@@ -15,6 +15,7 @@ import (
 	"github.com/docker/distribution/notifications"
 	"github.com/docker/distribution/registry/api/v2"
 	"github.com/docker/distribution/registry/auth"
+	"github.com/docker/distribution/registry/index"
 	registrymiddleware "github.com/docker/distribution/registry/middleware/registry"
 	repositorymiddleware "github.com/docker/distribution/registry/middleware/repository"
 	"github.com/docker/distribution/registry/storage"
@@ -47,6 +48,7 @@ type App struct {
 	}
 
 	redis *redis.Pool
+	index *index.IndexService
 }
 
 // NewApp takes a configuration and returns a configured app, ready to serve
@@ -70,6 +72,7 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 	app.register(v2.RouteNameBlob, layerDispatcher)
 	app.register(v2.RouteNameBlobUpload, layerUploadDispatcher)
 	app.register(v2.RouteNameBlobUploadChunk, layerUploadDispatcher)
+	app.register(v2.RouteNameIndex, indexDispatcher)
 
 	var err error
 	app.driver, err = factory.Create(configuration.Storage.Type(), configuration.Storage.Parameters())
@@ -98,6 +101,7 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 		panic(err)
 	}
 
+	app.configureIndex(&configuration)
 	app.configureEvents(&configuration)
 	app.configureRedis(&configuration)
 
@@ -157,6 +161,14 @@ func (app *App) register(routeName string, dispatch dispatchFunc) {
 	app.router.GetRoute(routeName).Handler(app.dispatcher(dispatch))
 }
 
+func (app *App) configureIndex(configuration *configuration.Configuration) {
+	var err error
+	app.index, err = index.New(configuration)
+	if err != nil {
+		ctxu.GetLogger(app).Error("index service configuration failed: ", err.Error())
+	}
+}
+
 // configureEvents prepares the event sink for action.
 func (app *App) configureEvents(configuration *configuration.Configuration) {
 	// Configure all of the endpoint sinks.
@@ -176,6 +188,10 @@ func (app *App) configureEvents(configuration *configuration.Configuration) {
 		})
 
 		sinks = append(sinks, endpoint)
+	}
+
+	if app.index != nil {
+		sinks = append(sinks, app.index.Sink())
 	}
 
 	// NOTE(stevvooe): Moving to a new queueing implementation is as easy as
@@ -490,7 +506,12 @@ func (app *App) eventBridge(ctx *Context, r *http.Request) notifications.Listene
 // nameRequired returns true if the route requires a name.
 func (app *App) nameRequired(r *http.Request) bool {
 	route := mux.CurrentRoute(r)
-	return route == nil || route.GetName() != v2.RouteNameBase
+	if route == nil {
+		return true
+	}
+
+	routeName := route.GetName()
+	return routeName != v2.RouteNameBase && routeName != v2.RouteNameIndex
 }
 
 // apiBase implements a simple yes-man for doing overall checks against the

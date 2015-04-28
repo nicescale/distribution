@@ -389,6 +389,52 @@ var routeDescriptors = []RouteDescriptor{
 		},
 	},
 	{
+		Name:        RouteNameIndex,
+		Path:        "/v2/index",
+		Entity:      "Index",
+		Description: `Index service for registry V2.`,
+		Methods: []MethodDescriptor{
+			{
+				Method:      "GET",
+				Description: "Search images in the registry.",
+				Requests: []RequestDescriptor{
+					{
+						Headers: []ParameterDescriptor{
+							hostHeader,
+							authHeader,
+						},
+						Successes: []ResponseDescriptor{
+							{
+								Description: "The API implements V2 protocol and is accessible.",
+								StatusCode:  http.StatusOK,
+							},
+						},
+						Failures: []ResponseDescriptor{
+							{
+								Description: "The client is not authorized to access the registry.",
+								StatusCode:  http.StatusUnauthorized,
+								Headers: []ParameterDescriptor{
+									authChallengeHeader,
+								},
+								Body: BodyDescriptor{
+									ContentType: "application/json; charset=utf-8",
+									Format:      errorsBody,
+								},
+								ErrorCodes: []ErrorCode{
+									ErrorCodeUnauthorized,
+								},
+							},
+							{
+								Description: "The registry does not implement the V2 API.",
+								StatusCode:  http.StatusNotFound,
+							},
+						},
+					},
+				},
+			},
+		},
+	},
+	{
 		Name:        RouteNameTags,
 		Path:        "/v2/{name:" + RepositoryNameRegexp.String() + "}/tags/list",
 		Entity:      "Tags",
