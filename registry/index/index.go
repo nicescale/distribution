@@ -139,6 +139,7 @@ func (self *IndexService) GetPage(args QueryArgs) ([]Record, error) {
 		logrus.Error("select prepare: ", err)
 		return nil, err
 	}
+	defer stmt.Close()
 
 	var rows *sql.Rows
 
