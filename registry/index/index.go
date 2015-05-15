@@ -2,6 +2,8 @@ package index
 
 import (
 	"database/sql"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,7 +57,9 @@ func New(configuration *configuration.Configuration) (*IndexService, error) {
 		srv   = &IndexService{}
 		stmts [4]string
 	)
-	srv.db, err = sql.Open("sqlite3", "/registry.sqlite3")
+	storageParams := configuration.Storage.Parameters()
+	dbPath := filepath.Join(fmt.Sprint(storageParams["rootdirectory"]), "registry.sqlite3")
+	srv.db, err = sql.Open("sqlite3", dbPath)
 	if err != nil {
 		logrus.Error("Failed to open database: ", err)
 		return nil, err
