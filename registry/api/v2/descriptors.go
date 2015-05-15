@@ -432,6 +432,12 @@ var routeDescriptors = []RouteDescriptor{
 					},
 				},
 			},
+		},
+	},
+	{
+		Name: RouteNameTagStatus,
+		Path: "/v2/{name:" + RepositoryNameRegexp.String() + "}/status",
+		Methods: []MethodDescriptor{
 			{
 				Method:      "PATCH",
 				Description: "Set the status of the image tag.",

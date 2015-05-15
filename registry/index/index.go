@@ -3,6 +3,7 @@ package index
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ func New(configuration *configuration.Configuration) (*IndexService, error) {
 	)
 	storageParams := configuration.Storage.Parameters()
 	dbPath := filepath.Join(fmt.Sprint(storageParams["rootdirectory"]), "registry.sqlite3")
+	os.MkdirAll(filepath.Dir(dbPath), 0755)
 	srv.db, err = sql.Open("sqlite3", dbPath)
 	if err != nil {
 		logrus.Error("Failed to open database: ", err)
@@ -126,7 +128,7 @@ func (self *IndexService) add(event notifications.Event) error {
 		return err
 	}
 
-	query = "replace into tags(repository, tag, digest, url, updated_at) values(?,?,?,?,?)"
+	query = "replace into tags(repository, tag, digest, url, updated_at, status) values(?,?,?,?,?,'unset')"
 	tag := self.parseTag(event.Target.URL)
 	if _, err := self.db.Exec(query, target.Repository, tag, string(target.Digest), target.URL, time.Now()); err != nil {
 		logrus.Error("sqlite insert: ", err)
@@ -187,11 +189,11 @@ func (self *IndexService) GetPage(args QueryArgs) ([]Repository, error) {
 		err = rows.Scan(&record.Repository)
 		if err == nil {
 			var tags *sql.Rows
-			tags, err = self.db.Query("select repository, tag, digest, url, updated_at from tags where repository = ?", record.Repository)
+			tags, err = self.db.Query("select repository, tag, digest, url, status, updated_at from tags where repository = ?", record.Repository)
 			if err == nil {
 				for tags.Next() {
 					tag := Tag{}
-					err = tags.Scan(&tag.Repository, &tag.Tag, &tag.Digest, &tag.Url, &tag.UpdatedAt)
+					err = tags.Scan(&tag.Repository, &tag.Tag, &tag.Digest, &tag.Url, &tag.Status, &tag.UpdatedAt)
 					if err == nil {
 						record.Tags = append(record.Tags, tag)
 					}
@@ -208,6 +210,6 @@ func (self *IndexService) GetPage(args QueryArgs) ([]Repository, error) {
 }
 
 func (self *IndexService) SetTagStatus(repo, tag, status string) error {
-	_, err := self.db.Exec("update tags set status=? where repo=? and tag=?", status, repo, tag)
+	_, err := self.db.Exec("update tags set status=? where repository=? and tag=?", status, repo, tag)
 	return err
 }

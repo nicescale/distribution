@@ -73,6 +73,7 @@ func NewApp(ctx context.Context, configuration configuration.Configuration) *App
 	app.register(v2.RouteNameBlobUpload, layerUploadDispatcher)
 	app.register(v2.RouteNameBlobUploadChunk, layerUploadDispatcher)
 	app.register(v2.RouteNameIndex, indexDispatcher)
+	app.register(v2.RouteNameTagStatus, tagStatusDispatcher)
 
 	var err error
 	app.driver, err = factory.Create(configuration.Storage.Type(), configuration.Storage.Parameters())
