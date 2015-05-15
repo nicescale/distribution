@@ -1,6 +1,6 @@
 {
 	"ImportPath": "github.com/docker/distribution",
-	"GoVersion": "go1.4.2",
+	"GoVersion": "go1.4",
 	"Packages": [
 		"./..."
 	],
@@ -87,6 +87,10 @@
 		{
 			"ImportPath": "github.com/jlhawn/go-crypto",
 			"Rev": "cd738dde20f0b3782516181b0866c9bb9db47401"
+		},
+		{
+			"ImportPath": "github.com/mattn/go-sqlite3",
+			"Rev": "d8029554b4cbb9a1c12311d307f4154b515566b4"
 		},
 		{
 			"ImportPath": "github.com/yvasiyarov/go-metrics",
