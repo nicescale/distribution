@@ -432,6 +432,25 @@ var routeDescriptors = []RouteDescriptor{
 					},
 				},
 			},
+			{
+				Method:      "PATCH",
+				Description: "Set the status of the image tag.",
+				Requests: []RequestDescriptor{
+					{
+						Headers: []ParameterDescriptor{
+							hostHeader,
+							authHeader,
+						},
+						Successes: []ResponseDescriptor{
+							{
+								Description: "Set image tag status succeeded.",
+								StatusCode:  http.StatusOK,
+							},
+						},
+						Failures: []ResponseDescriptor{},
+					},
+				},
+			},
 		},
 	},
 	{

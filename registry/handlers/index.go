@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -16,7 +17,8 @@ func indexDispatcher(ctx *Context, r *http.Request) http.Handler {
 	}
 
 	return handlers.MethodHandler{
-		"GET": http.HandlerFunc(indexHandler.GetPage),
+		"GET":   http.HandlerFunc(indexHandler.GetPage),
+		"PATCH": http.HandlerFunc(indexHandler.SetTagStatus),
 	}
 }
 
@@ -48,4 +50,23 @@ func (ih *indexHandler) GetPage(w http.ResponseWriter, r *http.Request) {
 		ih.Errors.PushErr(err)
 		return
 	}
+}
+
+func (ih *indexHandler) SetTagStatus(w http.ResponseWriter, r *http.Request) {
+	req := make(map[string]string)
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	err = ih.index.SetTagStatus(req["repo"], req["tag"], req["status"])
+	if err == sql.ErrNoRows {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.WriteHeader(204)
 }

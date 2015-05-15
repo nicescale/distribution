@@ -55,7 +55,19 @@ func (ms *manifestStore) Put(manifest *manifest.SignedManifest) error {
 // Delete removes the revision of the specified manfiest.
 func (ms *manifestStore) Delete(dgst digest.Digest) error {
 	ctxu.GetLogger(ms.repository.ctx).Debug("(*manifestStore).Delete")
-	return ms.revisionStore.delete(dgst)
+	if err := ms.revisionStore.delete(dgst); err != nil {
+		return err
+	}
+	tags, err := ms.Tags()
+	if err != nil {
+		return err
+	}
+	for _, tag := range tags {
+		if d, err := ms.tagStore.resolve(tag); err == nil && d == dgst {
+			err = ms.tagStore.delete(tag)
+		}
+	}
+	return err
 }
 
 func (ms *manifestStore) Tags() ([]string, error) {

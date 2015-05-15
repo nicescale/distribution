@@ -2,6 +2,7 @@ package index
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -15,10 +16,17 @@ const (
 	defaultLimit = 20
 )
 
-type Record struct {
+type Repository struct {
+	Repository string `json:"repository"`
+	Tags       []Tag  `json:"tags"`
+}
+
+type Tag struct {
 	Repository string    `json:"repository"`
+	Tag        string    `json:"tag"`
 	Digest     string    `json:"digest"`
 	Url        string    `json:"url"`
+	Status     string    `json:"status"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
@@ -45,7 +53,7 @@ func New(configuration *configuration.Configuration) (*IndexService, error) {
 	var (
 		err   error
 		srv   = &IndexService{}
-		stmts [2]string
+		stmts [4]string
 	)
 	srv.db, err = sql.Open("sqlite3", "/registry.sqlite3")
 	if err != nil {
@@ -53,14 +61,21 @@ func New(configuration *configuration.Configuration) (*IndexService, error) {
 		return nil, err
 	}
 
-	stmts[0] = `create table if not exists repositories (
+	stmts[0] = `create table if not exists tags(
 		id         integer primary key,
 		repository varchar(256),
 		digest     varchar(80),
 		url        varchar(256),
+		tag        varchar(256),
+		status     varchar(32),
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`
-	stmts[1] = `create unique index if not exists idx_name on repositories(repository)`
+	stmts[1] = `create unique index if not exists idx_name_tag on tags(repository, tag)`
+	stmts[2] = `create table repositories(
+		id         integer primary key,
+		repository varchar(256)
+	)`
+	stmts[3] = `create unique index if not exists idx_name on repositories(repository)`
 	for _, stmt := range stmts {
 		if _, err := srv.db.Exec(stmt); err != nil {
 			logrus.Error("Failed to prepare database: ", err)
@@ -78,7 +93,7 @@ func (self *IndexService) Write(events ...notifications.Event) error {
 				if err := self.delete(event); err != nil {
 					return err
 				}
-			} else {
+			} else if event.Action == notifications.EventActionPush {
 				if err := self.add(event); err != nil {
 					return err
 				}
@@ -89,31 +104,39 @@ func (self *IndexService) Write(events ...notifications.Event) error {
 }
 
 func (self *IndexService) delete(event notifications.Event) error {
-	query := "delete from repositories where repository=?"
-	stmt, err := self.db.Prepare(query)
-	if err != nil {
-		logrus.Error("sqlite prepare: ", err)
-		return err
+	tag := self.parseTag(event.Target.URL)
+	query := "delete from tags where repository=? and tag=?"
+	_, err := self.db.Exec(query, event.Target.Repository, tag)
+	if err == nil {
+		_, err = self.db.Exec("delete from repositories where repository not in (select distinct repository from tags)")
 	}
-	_, err = stmt.Exec(event.Target.Repository)
 	return err
 }
 
 func (self *IndexService) add(event notifications.Event) error {
-	query := "replace into repositories(repository, digest, url, updated_at) values(?,?,?,?)"
-	stmt, err := self.db.Prepare(query)
-	if err != nil {
-		logrus.Error("sqlite prepare: ", err)
+	target := event.Target
+	query := "replace into repositories(repository) values(?)"
+
+	if _, err := self.db.Exec(query, target.Repository); err != nil {
+		logrus.Error("sqlite insert: ", err)
 		return err
 	}
-	defer stmt.Close()
 
-	target := event.Target
-	if _, err := stmt.Exec(target.Repository, string(target.Digest), target.URL, time.Now()); err != nil {
+	query = "replace into tags(repository, tag, digest, url, updated_at) values(?,?,?,?,?)"
+	tag := self.parseTag(event.Target.URL)
+	if _, err := self.db.Exec(query, target.Repository, tag, string(target.Digest), target.URL, time.Now()); err != nil {
 		logrus.Error("sqlite insert: ", err)
 		return err
 	}
 	return nil
+}
+
+func (self *IndexService) parseTag(url string) string {
+	parts := strings.Split(url, "/")
+	if l := len(parts); l > 1 {
+		return parts[l-1]
+	}
+	return ""
 }
 
 func (self *IndexService) Close() error {
@@ -126,9 +149,9 @@ func (self *IndexService) Sink() notifications.Sink {
 	return self
 }
 
-func (self *IndexService) GetPage(args QueryArgs) ([]Record, error) {
+func (self *IndexService) GetPage(args QueryArgs) ([]Repository, error) {
 	args.prepare()
-	query := "select repository, digest, url, updated_at from repositories "
+	query := "select repository from repositories "
 	if len(args.Keyword) > 0 {
 		query += " where repository like ? "
 	}
@@ -154,10 +177,23 @@ func (self *IndexService) GetPage(args QueryArgs) ([]Record, error) {
 		return nil, err
 	}
 
-	records := []Record{}
+	records := []Repository{}
 	for rows.Next() {
-		record := Record{}
-		err = rows.Scan(&record.Repository, &record.Digest, &record.Url, &record.UpdatedAt)
+		record := Repository{Tags: []Tag{}}
+		err = rows.Scan(&record.Repository)
+		if err == nil {
+			var tags *sql.Rows
+			tags, err = self.db.Query("select repository, tag, digest, url, updated_at from tags where repository = ?", record.Repository)
+			if err == nil {
+				for tags.Next() {
+					tag := Tag{}
+					err = tags.Scan(&tag.Repository, &tag.Tag, &tag.Digest, &tag.Url, &tag.UpdatedAt)
+					if err == nil {
+						record.Tags = append(record.Tags, tag)
+					}
+				}
+			}
+		}
 		if err != nil {
 			logrus.Error("failed to scan rows: ", err)
 			continue
@@ -165,4 +201,9 @@ func (self *IndexService) GetPage(args QueryArgs) ([]Record, error) {
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+func (self *IndexService) SetTagStatus(repo, tag, status string) error {
+	_, err := self.db.Exec("update tags set status=? where repo=? and tag=?", status, repo, tag)
+	return err
 }
