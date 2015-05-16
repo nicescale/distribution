@@ -25,12 +25,14 @@ type Repository struct {
 }
 
 type Tag struct {
-	Repository string    `json:"repository"`
-	Tag        string    `json:"tag"`
-	Digest     string    `json:"digest"`
-	Url        string    `json:"url"`
-	Status     string    `json:"status"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	Repository  string    `json:"repository"`
+	Tag         string    `json:"tag"`
+	Digest      string    `json:"digest"`
+	Url         string    `json:"url"`
+	Status      string    `json:"status"`
+	Description string    `json:"description"`
+	TargetURL   string    `json:"target_url"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type QueryArgs struct {
@@ -74,6 +76,8 @@ func New(configuration *configuration.Configuration) (*IndexService, error) {
 		url        varchar(256),
 		tag        varchar(256),
 		status     varchar(32),
+		description varchar(256),
+		target_url varchar(256),
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`
 	stmts[1] = `create unique index if not exists idx_name_tag on tags(repository, tag)`
@@ -128,7 +132,7 @@ func (self *IndexService) add(event notifications.Event) error {
 		return err
 	}
 
-	query = "replace into tags(repository, tag, digest, url, updated_at, status) values(?,?,?,?,?,'unset')"
+	query = "replace into tags(repository, tag, digest, url, updated_at, status, description, target_url) values(?,?,?,?,?,'unset','','')"
 	tag := self.parseTag(event.Target.URL)
 	if _, err := self.db.Exec(query, target.Repository, tag, string(target.Digest), target.URL, time.Now()); err != nil {
 		logrus.Error("sqlite insert: ", err)
@@ -189,11 +193,11 @@ func (self *IndexService) GetPage(args QueryArgs) ([]Repository, error) {
 		err = rows.Scan(&record.Repository)
 		if err == nil {
 			var tags *sql.Rows
-			tags, err = self.db.Query("select repository, tag, digest, url, status, updated_at from tags where repository = ?", record.Repository)
+			tags, err = self.db.Query("select repository, tag, digest, url, status, description, target_url, updated_at from tags where repository = ?", record.Repository)
 			if err == nil {
 				for tags.Next() {
 					tag := Tag{}
-					err = tags.Scan(&tag.Repository, &tag.Tag, &tag.Digest, &tag.Url, &tag.Status, &tag.UpdatedAt)
+					err = tags.Scan(&tag.Repository, &tag.Tag, &tag.Digest, &tag.Url, &tag.Status, &tag.Description, &tag.TargetURL, &tag.UpdatedAt)
 					if err == nil {
 						record.Tags = append(record.Tags, tag)
 					}
@@ -209,7 +213,7 @@ func (self *IndexService) GetPage(args QueryArgs) ([]Repository, error) {
 	return records, nil
 }
 
-func (self *IndexService) SetTagStatus(repo, tag, status string) error {
-	_, err := self.db.Exec("update tags set status=? where repository=? and tag=?", status, repo, tag)
+func (self *IndexService) SetTagStatus(repo, tag, status, description, target_url string) error {
+	_, err := self.db.Exec("update tags set status=?, description=?, target_url=? where repository=? and tag=?", status, description, target_url, repo, tag)
 	return err
 }

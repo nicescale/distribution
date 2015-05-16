@@ -31,7 +31,7 @@ func (th *tagStatusHandler) SetTagStatus(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	err = th.index.SetTagStatus(req["repository"], req["tag"], req["status"])
+	err = th.index.SetTagStatus(req["repository"], req["tag"], req["status"], req["description"], req["target_url"])
 	if err == sql.ErrNoRows {
 		http.Error(w, err.Error(), 404)
 		return
