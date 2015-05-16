@@ -81,7 +81,7 @@ func New(configuration *configuration.Configuration) (*IndexService, error) {
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`
 	stmts[1] = `create unique index if not exists idx_name_tag on tags(repository, tag)`
-	stmts[2] = `create table repositories(
+	stmts[2] = `create table if not exists repositories(
 		id         integer primary key,
 		repository varchar(256)
 	)`
