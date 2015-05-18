@@ -432,6 +432,25 @@ var routeDescriptors = []RouteDescriptor{
 					},
 				},
 			},
+			{
+				Method:      "HEAD",
+				Description: "Check if it's cSphere modified version.",
+				Requests: []RequestDescriptor{
+					{
+						Headers: []ParameterDescriptor{
+							hostHeader,
+							authHeader,
+						},
+						Successes: []ResponseDescriptor{
+							{
+								Description: "cSphere version",
+								StatusCode:  http.StatusOK,
+							},
+						},
+						Failures: []ResponseDescriptor{},
+					},
+				},
+			},
 		},
 	},
 	{

@@ -16,7 +16,8 @@ func indexDispatcher(ctx *Context, r *http.Request) http.Handler {
 	}
 
 	return handlers.MethodHandler{
-		"GET": http.HandlerFunc(indexHandler.GetPage),
+		"GET":  http.HandlerFunc(indexHandler.GetPage),
+		"HEAD": http.HandlerFunc(indexHandler.AnnounceCsphere),
 	}
 }
 
@@ -48,4 +49,7 @@ func (ih *indexHandler) GetPage(w http.ResponseWriter, r *http.Request) {
 		ih.Errors.PushErr(err)
 		return
 	}
+}
+
+func (ih *indexHandler) AnnounceCsphere(w http.ResponseWriter, r *http.Request) {
 }
