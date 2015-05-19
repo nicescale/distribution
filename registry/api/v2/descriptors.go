@@ -433,7 +433,7 @@ var routeDescriptors = []RouteDescriptor{
 				},
 			},
 			{
-				Method:      "HEAD",
+				Method:      "OPTIONS",
 				Description: "Check if it's cSphere modified version.",
 				Requests: []RequestDescriptor{
 					{
