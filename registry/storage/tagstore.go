@@ -4,39 +4,46 @@ import (
 	"path"
 
 	"github.com/docker/distribution"
-	//	"github.com/docker/distribution/context"
+	"github.com/docker/distribution/context"
 	"github.com/docker/distribution/digest"
 	storagedriver "github.com/docker/distribution/registry/storage/driver"
 )
 
+var _ distribution.TagService = &tagStore{}
+
 // tagStore provides methods to manage manifest tags in a backend storage driver.
+// This implementation uses the same on-disk layout as the (now deleted) tag
+// store.  This provides backward compatibility with current registry deployments
+// which only makes use of the Digest field of the returned distribution.Descriptor
+// but does not enable full roundtripping of Descriptor objects
 type tagStore struct {
-	*repository
+	repository *repository
+	blobStore  *blobStore
 }
 
-// tags lists the manifest tags for the specified repository.
-func (ts *tagStore) tags() ([]string, error) {
-	p, err := ts.pm.path(manifestTagPathSpec{
-		name: ts.name,
+// All returns all tags
+func (ts *tagStore) All(ctx context.Context) ([]string, error) {
+	var tags []string
+
+	pathSpec, err := pathFor(manifestTagPathSpec{
+		name: ts.repository.Name(),
 	})
 	if err != nil {
-		return nil, err
+		return tags, err
 	}
 
-	var tags []string
-	entries, err := ts.driver.List(ts.repository.ctx, p)
+	entries, err := ts.blobStore.driver.List(ctx, pathSpec)
 	if err != nil {
 		switch err := err.(type) {
 		case storagedriver.PathNotFoundError:
-			return nil, distribution.ErrRepositoryUnknown{Name: ts.name}
+			return tags, distribution.ErrRepositoryUnknown{Name: ts.repository.Name()}
 		default:
-			return nil, err
+			return tags, err
 		}
 	}
 
 	for _, entry := range entries {
 		_, filename := path.Split(entry)
-
 		tags = append(tags, filename)
 	}
 
@@ -44,16 +51,17 @@ func (ts *tagStore) tags() ([]string, error) {
 }
 
 // exists returns true if the specified manifest tag exists in the repository.
-func (ts *tagStore) exists(tag string) (bool, error) {
-	tagPath, err := ts.pm.path(manifestTagCurrentPathSpec{
-		name: ts.Name(),
+func (ts *tagStore) exists(ctx context.Context, tag string) (bool, error) {
+	tagPath, err := pathFor(manifestTagCurrentPathSpec{
+		name: ts.repository.Name(),
 		tag:  tag,
 	})
+
 	if err != nil {
 		return false, err
 	}
 
-	exists, err := exists(ts.repository.ctx, ts.driver, tagPath)
+	exists, err := exists(ctx, ts.blobStore.driver, tagPath)
 	if err != nil {
 		return false, err
 	}
@@ -61,21 +69,11 @@ func (ts *tagStore) exists(tag string) (bool, error) {
 	return exists, nil
 }
 
-// tag tags the digest with the given tag, updating the the store to point at
+// Tag tags the digest with the given tag, updating the the store to point at
 // the current tag. The digest must point to a manifest.
-func (ts *tagStore) tag(tag string, revision digest.Digest) error {
-	indexEntryPath, err := ts.pm.path(manifestTagIndexEntryLinkPathSpec{
-		name:     ts.Name(),
-		tag:      tag,
-		revision: revision,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	currentPath, err := ts.pm.path(manifestTagCurrentPathSpec{
-		name: ts.Name(),
+func (ts *tagStore) Tag(ctx context.Context, tag string, desc distribution.Descriptor) error {
+	currentPath, err := pathFor(manifestTagCurrentPathSpec{
+		name: ts.repository.Name(),
 		tag:  tag,
 	})
 
@@ -83,77 +81,111 @@ func (ts *tagStore) tag(tag string, revision digest.Digest) error {
 		return err
 	}
 
+	lbs := ts.linkedBlobStore(ctx, tag)
+
 	// Link into the index
-	if err := ts.blobStore.link(indexEntryPath, revision); err != nil {
+	if err := lbs.linkBlob(ctx, desc); err != nil {
 		return err
 	}
 
 	// Overwrite the current link
-	return ts.blobStore.link(currentPath, revision)
+	return ts.blobStore.link(ctx, currentPath, desc.Digest)
 }
 
 // resolve the current revision for name and tag.
-func (ts *tagStore) resolve(tag string) (digest.Digest, error) {
-	currentPath, err := ts.pm.path(manifestTagCurrentPathSpec{
-		name: ts.Name(),
+func (ts *tagStore) Get(ctx context.Context, tag string) (distribution.Descriptor, error) {
+	currentPath, err := pathFor(manifestTagCurrentPathSpec{
+		name: ts.repository.Name(),
 		tag:  tag,
 	})
 
 	if err != nil {
-		return "", err
+		return distribution.Descriptor{}, err
 	}
 
-	if exists, err := exists(ts.repository.ctx, ts.driver, currentPath); err != nil {
-		return "", err
-	} else if !exists {
-		return "", distribution.ErrManifestUnknown{Name: ts.Name(), Tag: tag}
-	}
-
-	revision, err := ts.blobStore.readlink(currentPath)
+	revision, err := ts.blobStore.readlink(ctx, currentPath)
 	if err != nil {
-		return "", err
+		switch err.(type) {
+		case storagedriver.PathNotFoundError:
+			return distribution.Descriptor{}, distribution.ErrTagUnknown{Tag: tag}
+		}
+
+		return distribution.Descriptor{}, err
 	}
 
-	return revision, nil
+	return distribution.Descriptor{Digest: revision}, nil
 }
 
-// revisions returns all revisions with the specified name and tag.
-func (ts *tagStore) revisions(tag string) ([]digest.Digest, error) {
-	manifestTagIndexPath, err := ts.pm.path(manifestTagIndexPathSpec{
-		name: ts.Name(),
+// Untag removes the tag association
+func (ts *tagStore) Untag(ctx context.Context, tag string) error {
+	tagPath, err := pathFor(manifestTagPathSpec{
+		name: ts.repository.Name(),
 		tag:  tag,
 	})
 
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO(stevvooe): Need to append digest alg to get listing of revisions.
-	manifestTagIndexPath = path.Join(manifestTagIndexPath, "sha256")
-
-	entries, err := ts.driver.List(ts.repository.ctx, manifestTagIndexPath)
-	if err != nil {
-		return nil, err
-	}
-
-	var revisions []digest.Digest
-	for _, entry := range entries {
-		revisions = append(revisions, digest.NewDigestFromHex("sha256", path.Base(entry)))
-	}
-
-	return revisions, nil
-}
-
-// delete removes the tag from repository, including the history of all
-// revisions that have the specified tag.
-func (ts *tagStore) delete(tag string) error {
-	tagPath, err := ts.pm.path(manifestTagPathSpec{
-		name: ts.Name(),
-		tag:  tag,
-	})
-	if err != nil {
+	switch err.(type) {
+	case storagedriver.PathNotFoundError:
+		return distribution.ErrTagUnknown{Tag: tag}
+	case nil:
+		break
+	default:
 		return err
 	}
 
-	return ts.driver.Delete(ts.repository.ctx, tagPath)
+	return ts.blobStore.driver.Delete(ctx, tagPath)
+}
+
+// linkedBlobStore returns the linkedBlobStore for the named tag, allowing one
+// to index manifest blobs by tag name. While the tag store doesn't map
+// precisely to the linked blob store, using this ensures the links are
+// managed via the same code path.
+func (ts *tagStore) linkedBlobStore(ctx context.Context, tag string) *linkedBlobStore {
+	return &linkedBlobStore{
+		blobStore:  ts.blobStore,
+		repository: ts.repository,
+		ctx:        ctx,
+		linkPathFns: []linkPathFunc{func(name string, dgst digest.Digest) (string, error) {
+			return pathFor(manifestTagIndexEntryLinkPathSpec{
+				name:     name,
+				tag:      tag,
+				revision: dgst,
+			})
+
+		}},
+	}
+}
+
+// Lookup recovers a list of tags which refer to this digest.  When a manifest is deleted by
+// digest, tag entries which point to it need to be recovered to avoid dangling tags.
+func (ts *tagStore) Lookup(ctx context.Context, desc distribution.Descriptor) ([]string, error) {
+	allTags, err := ts.All(ctx)
+	switch err.(type) {
+	case distribution.ErrRepositoryUnknown:
+		// This tag store has been initialized but not yet populated
+		break
+	case nil:
+		break
+	default:
+		return nil, err
+	}
+
+	var tags []string
+	for _, tag := range allTags {
+		tagLinkPathSpec := manifestTagCurrentPathSpec{
+			name: ts.repository.Name(),
+			tag:  tag,
+		}
+
+		tagLinkPath, err := pathFor(tagLinkPathSpec)
+		tagDigest, err := ts.blobStore.readlink(ctx, tagLinkPath)
+		if err != nil {
+			return nil, err
+		}
+
+		if tagDigest == desc.Digest {
+			tags = append(tags, tag)
+		}
+	}
+
+	return tags, nil
 }

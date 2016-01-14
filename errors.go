@@ -1,27 +1,29 @@
 package distribution
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/docker/distribution/digest"
-	"github.com/docker/distribution/manifest"
 )
 
-var (
-	// ErrLayerExists returned when layer already exists
-	ErrLayerExists = fmt.Errorf("layer exists")
+// ErrManifestNotModified is returned when a conditional manifest GetByTag
+// returns nil due to the client indicating it has the latest version
+var ErrManifestNotModified = errors.New("manifest not modified")
 
-	// ErrLayerTarSumVersionUnsupported when tarsum is unsupported version.
-	ErrLayerTarSumVersionUnsupported = fmt.Errorf("unsupported tarsum version")
+// ErrUnsupported is returned when an unimplemented or unsupported action is
+// performed
+var ErrUnsupported = errors.New("operation unsupported")
 
-	// ErrLayerUploadUnknown returned when upload is not found.
-	ErrLayerUploadUnknown = fmt.Errorf("layer upload unknown")
+// ErrTagUnknown is returned if the given tag is not known by the tag service
+type ErrTagUnknown struct {
+	Tag string
+}
 
-	// ErrLayerClosed returned when an operation is attempted on a closed
-	// Layer or LayerUpload.
-	ErrLayerClosed = fmt.Errorf("layer closed")
-)
+func (err ErrTagUnknown) Error() string {
+	return fmt.Sprintf("unknown tag=%s", err.Tag)
+}
 
 // ErrRepositoryUnknown is returned if the named repository is not known by
 // the registry.
@@ -30,7 +32,7 @@ type ErrRepositoryUnknown struct {
 }
 
 func (err ErrRepositoryUnknown) Error() string {
-	return fmt.Sprintf("unknown respository name=%s", err.Name)
+	return fmt.Sprintf("unknown repository name=%s", err.Name)
 }
 
 // ErrRepositoryNameInvalid should be used to denote an invalid repository
@@ -55,14 +57,14 @@ func (err ErrManifestUnknown) Error() string {
 	return fmt.Sprintf("unknown manifest name=%s tag=%s", err.Name, err.Tag)
 }
 
-// ErrUnknownManifestRevision is returned when a manifest cannot be found by
+// ErrManifestUnknownRevision is returned when a manifest cannot be found by
 // revision within a repository.
-type ErrUnknownManifestRevision struct {
+type ErrManifestUnknownRevision struct {
 	Name     string
 	Revision digest.Digest
 }
 
-func (err ErrUnknownManifestRevision) Error() string {
+func (err ErrManifestUnknownRevision) Error() string {
 	return fmt.Sprintf("unknown manifest name=%s revision=%s", err.Name, err.Revision)
 }
 
@@ -88,22 +90,22 @@ func (errs ErrManifestVerification) Error() string {
 	return fmt.Sprintf("errors verifying manifest: %v", strings.Join(parts, ","))
 }
 
-// ErrUnknownLayer returned when layer cannot be found.
-type ErrUnknownLayer struct {
-	FSLayer manifest.FSLayer
-}
-
-func (err ErrUnknownLayer) Error() string {
-	return fmt.Sprintf("unknown layer %v", err.FSLayer.BlobSum)
-}
-
-// ErrLayerInvalidDigest returned when tarsum check fails.
-type ErrLayerInvalidDigest struct {
+// ErrManifestBlobUnknown returned when a referenced blob cannot be found.
+type ErrManifestBlobUnknown struct {
 	Digest digest.Digest
+}
+
+func (err ErrManifestBlobUnknown) Error() string {
+	return fmt.Sprintf("unknown blob %v on manifest", err.Digest)
+}
+
+// ErrManifestNameInvalid should be used to denote an invalid manifest
+// name. Reason may set, indicating the cause of invalidity.
+type ErrManifestNameInvalid struct {
+	Name   string
 	Reason error
 }
 
-func (err ErrLayerInvalidDigest) Error() string {
-	return fmt.Sprintf("invalid digest for referenced layer: %v, %v",
-		err.Digest, err.Reason)
+func (err ErrManifestNameInvalid) Error() string {
+	return fmt.Sprintf("manifest name %q invalid: %v", err.Name, err.Reason)
 }

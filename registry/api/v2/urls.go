@@ -100,6 +100,18 @@ func (ub *URLBuilder) BuildBaseURL() (string, error) {
 	return baseURL.String(), nil
 }
 
+// BuildCatalogURL constructs a url get a catalog of repositories
+func (ub *URLBuilder) BuildCatalogURL(values ...url.Values) (string, error) {
+	route := ub.cloneRoute(RouteNameCatalog)
+
+	catalogURL, err := route.URL()
+	if err != nil {
+		return "", err
+	}
+
+	return appendValuesURL(catalogURL, values...).String(), nil
+}
+
 // BuildTagsURL constructs a url to list the tags in the named repository.
 func (ub *URLBuilder) BuildTagsURL(name string) (string, error) {
 	route := ub.cloneRoute(RouteNameTags)
@@ -192,7 +204,9 @@ func (cr clonedRoute) URL(pairs ...string) (*url.URL, error) {
 		routeURL.Path = routeURL.Path[1:]
 	}
 
-	return cr.root.ResolveReference(routeURL), nil
+	url := cr.root.ResolveReference(routeURL)
+	url.Scheme = cr.root.Scheme
+	return url, nil
 }
 
 // appendValuesURL appends the parameters to the url.

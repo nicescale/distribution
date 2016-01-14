@@ -1,18 +1,26 @@
 package handlers
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/docker/distribution"
 	ctxu "github.com/docker/distribution/context"
 	"github.com/docker/distribution/digest"
-	"github.com/docker/distribution/manifest"
+	"github.com/docker/distribution/manifest/manifestlist"
+	"github.com/docker/distribution/manifest/schema1"
+	"github.com/docker/distribution/manifest/schema2"
+	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/docker/distribution/registry/api/v2"
 	"github.com/gorilla/handlers"
-	"golang.org/x/net/context"
+)
+
+// These constants determine which architecture and OS to choose from a
+// manifest list when downconverting it to a schema1 manifest.
+const (
+	defaultArch = "amd64"
+	defaultOS   = "linux"
 )
 
 // imageManifestDispatcher takes the request context and builds the
@@ -30,11 +38,17 @@ func imageManifestDispatcher(ctx *Context, r *http.Request) http.Handler {
 		imageManifestHandler.Digest = dgst
 	}
 
-	return handlers.MethodHandler{
-		"GET":    http.HandlerFunc(imageManifestHandler.GetImageManifest),
-		"PUT":    http.HandlerFunc(imageManifestHandler.PutImageManifest),
-		"DELETE": http.HandlerFunc(imageManifestHandler.DeleteImageManifest),
+	mhandler := handlers.MethodHandler{
+		"GET":  http.HandlerFunc(imageManifestHandler.GetImageManifest),
+		"HEAD": http.HandlerFunc(imageManifestHandler.GetImageManifest),
 	}
+
+	if !ctx.readOnly {
+		mhandler["PUT"] = http.HandlerFunc(imageManifestHandler.PutImageManifest)
+		mhandler["DELETE"] = http.HandlerFunc(imageManifestHandler.DeleteImageManifest)
+	}
+
+	return mhandler
 }
 
 // imageManifestHandler handles http operations on image manifests.
@@ -49,113 +63,218 @@ type imageManifestHandler struct {
 // GetImageManifest fetches the image manifest from the storage backend, if it exists.
 func (imh *imageManifestHandler) GetImageManifest(w http.ResponseWriter, r *http.Request) {
 	ctxu.GetLogger(imh).Debug("GetImageManifest")
-	manifests := imh.Repository.Manifests()
-
-	var (
-		sm  *manifest.SignedManifest
-		err error
-	)
-
-	if imh.Tag != "" {
-		sm, err = manifests.GetByTag(imh.Tag)
-	} else {
-		sm, err = manifests.Get(imh.Digest)
-	}
-
+	manifests, err := imh.Repository.Manifests(imh)
 	if err != nil {
-		imh.Errors.Push(v2.ErrorCodeManifestUnknown, err)
-		w.WriteHeader(http.StatusNotFound)
+		imh.Errors = append(imh.Errors, err)
 		return
 	}
 
-	// Get the digest, if we don't already have it.
-	if imh.Digest == "" {
-		dgst, err := digestManifest(imh, sm)
+	var manifest distribution.Manifest
+	if imh.Tag != "" {
+		tags := imh.Repository.Tags(imh)
+		desc, err := tags.Get(imh, imh.Tag)
 		if err != nil {
-			imh.Errors.Push(v2.ErrorCodeDigestInvalid, err)
-			w.WriteHeader(http.StatusBadRequest)
+			imh.Errors = append(imh.Errors, v2.ErrorCodeManifestUnknown.WithDetail(err))
+			return
+		}
+		imh.Digest = desc.Digest
+	}
+
+	if etagMatch(r, imh.Digest.String()) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	manifest, err = manifests.Get(imh, imh.Digest)
+	if err != nil {
+		imh.Errors = append(imh.Errors, v2.ErrorCodeManifestUnknown.WithDetail(err))
+		return
+	}
+
+	supportsSchema2 := false
+	supportsManifestList := false
+	if acceptHeaders, ok := r.Header["Accept"]; ok {
+		for _, mediaType := range acceptHeaders {
+			if mediaType == schema2.MediaTypeManifest {
+				supportsSchema2 = true
+			}
+			if mediaType == manifestlist.MediaTypeManifestList {
+				supportsManifestList = true
+			}
+		}
+	}
+
+	schema2Manifest, isSchema2 := manifest.(*schema2.DeserializedManifest)
+	manifestList, isManifestList := manifest.(*manifestlist.DeserializedManifestList)
+
+	// Only rewrite schema2 manifests when they are being fetched by tag.
+	// If they are being fetched by digest, we can't return something not
+	// matching the digest.
+	if imh.Tag != "" && isSchema2 && !supportsSchema2 {
+		// Rewrite manifest in schema1 format
+		ctxu.GetLogger(imh).Infof("rewriting manifest %s in schema1 format to support old client", imh.Digest.String())
+
+		manifest, err = imh.convertSchema2Manifest(schema2Manifest)
+		if err != nil {
+			return
+		}
+	} else if imh.Tag != "" && isManifestList && !supportsManifestList {
+		// Rewrite manifest in schema1 format
+		ctxu.GetLogger(imh).Infof("rewriting manifest list %s in schema1 format to support old client", imh.Digest.String())
+
+		// Find the image manifest corresponding to the default
+		// platform
+		var manifestDigest digest.Digest
+		for _, manifestDescriptor := range manifestList.Manifests {
+			if manifestDescriptor.Platform.Architecture == defaultArch && manifestDescriptor.Platform.OS == defaultOS {
+				manifestDigest = manifestDescriptor.Digest
+				break
+			}
+		}
+
+		if manifestDigest == "" {
+			imh.Errors = append(imh.Errors, v2.ErrorCodeManifestUnknown)
 			return
 		}
 
-		imh.Digest = dgst
+		manifest, err = manifests.Get(imh, manifestDigest)
+		if err != nil {
+			imh.Errors = append(imh.Errors, v2.ErrorCodeManifestUnknown.WithDetail(err))
+			return
+		}
+
+		// If necessary, convert the image manifest
+		if schema2Manifest, isSchema2 := manifest.(*schema2.DeserializedManifest); isSchema2 && !supportsSchema2 {
+			manifest, err = imh.convertSchema2Manifest(schema2Manifest)
+			if err != nil {
+				return
+			}
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Length", fmt.Sprint(len(sm.Raw)))
+	ct, p, err := manifest.Payload()
+	if err != nil {
+		return
+	}
+
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", fmt.Sprint(len(p)))
 	w.Header().Set("Docker-Content-Digest", imh.Digest.String())
-	w.Write(sm.Raw)
+	w.Header().Set("Etag", fmt.Sprintf(`"%s"`, imh.Digest))
+	w.Write(p)
 }
 
-// PutImageManifest validates and stores and image in the registry.
+func (imh *imageManifestHandler) convertSchema2Manifest(schema2Manifest *schema2.DeserializedManifest) (distribution.Manifest, error) {
+	targetDescriptor := schema2Manifest.Target()
+	blobs := imh.Repository.Blobs(imh)
+	configJSON, err := blobs.Get(imh, targetDescriptor.Digest)
+	if err != nil {
+		imh.Errors = append(imh.Errors, v2.ErrorCodeManifestInvalid.WithDetail(err))
+		return nil, err
+	}
+
+	builder := schema1.NewConfigManifestBuilder(imh.Repository.Blobs(imh), imh.Context.App.trustKey, imh.Repository.Name(), imh.Tag, configJSON)
+	for _, d := range schema2Manifest.References() {
+		if err := builder.AppendReference(d); err != nil {
+			imh.Errors = append(imh.Errors, v2.ErrorCodeManifestInvalid.WithDetail(err))
+			return nil, err
+		}
+	}
+	manifest, err := builder.Build(imh)
+	if err != nil {
+		imh.Errors = append(imh.Errors, v2.ErrorCodeManifestInvalid.WithDetail(err))
+		return nil, err
+	}
+
+	return manifest, nil
+}
+
+func etagMatch(r *http.Request, etag string) bool {
+	for _, headerVal := range r.Header["If-None-Match"] {
+		if headerVal == etag || headerVal == fmt.Sprintf(`"%s"`, etag) { // allow quoted or unquoted
+			return true
+		}
+	}
+	return false
+}
+
+// PutImageManifest validates and stores an image in the registry.
 func (imh *imageManifestHandler) PutImageManifest(w http.ResponseWriter, r *http.Request) {
 	ctxu.GetLogger(imh).Debug("PutImageManifest")
-	manifests := imh.Repository.Manifests()
-	dec := json.NewDecoder(r.Body)
-
-	var manifest manifest.SignedManifest
-	if err := dec.Decode(&manifest); err != nil {
-		imh.Errors.Push(v2.ErrorCodeManifestInvalid, err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	dgst, err := digestManifest(imh, &manifest)
+	manifests, err := imh.Repository.Manifests(imh)
 	if err != nil {
-		imh.Errors.Push(v2.ErrorCodeDigestInvalid, err)
-		w.WriteHeader(http.StatusBadRequest)
+		imh.Errors = append(imh.Errors, err)
 		return
 	}
 
-	// Validate manifest tag or digest matches payload
-	if imh.Tag != "" {
-		if manifest.Tag != imh.Tag {
-			ctxu.GetLogger(imh).Errorf("invalid tag on manifest payload: %q != %q", manifest.Tag, imh.Tag)
-			imh.Errors.Push(v2.ErrorCodeTagInvalid)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
+	var jsonBuf bytes.Buffer
+	if err := copyFullPayload(w, r, &jsonBuf, imh, "image manifest PUT", &imh.Errors); err != nil {
+		// copyFullPayload reports the error if necessary
+		return
+	}
 
-		imh.Digest = dgst
-	} else if imh.Digest != "" {
-		if dgst != imh.Digest {
-			ctxu.GetLogger(imh).Errorf("payload digest does match: %q != %q", dgst, imh.Digest)
-			imh.Errors.Push(v2.ErrorCodeDigestInvalid)
-			w.WriteHeader(http.StatusBadRequest)
+	mediaType := r.Header.Get("Content-Type")
+	manifest, desc, err := distribution.UnmarshalManifest(mediaType, jsonBuf.Bytes())
+	if err != nil {
+		imh.Errors = append(imh.Errors, v2.ErrorCodeManifestInvalid.WithDetail(err))
+		return
+	}
+
+	if imh.Digest != "" {
+		if desc.Digest != imh.Digest {
+			ctxu.GetLogger(imh).Errorf("payload digest does match: %q != %q", desc.Digest, imh.Digest)
+			imh.Errors = append(imh.Errors, v2.ErrorCodeDigestInvalid)
 			return
 		}
+	} else if imh.Tag != "" {
+		imh.Digest = desc.Digest
 	} else {
-		imh.Errors.Push(v2.ErrorCodeTagInvalid, "no tag or digest specified")
-		w.WriteHeader(http.StatusBadRequest)
+		imh.Errors = append(imh.Errors, v2.ErrorCodeTagInvalid.WithDetail("no tag or digest specified"))
 		return
 	}
 
-	if err := manifests.Put(&manifest); err != nil {
+	_, err = manifests.Put(imh, manifest)
+	if err != nil {
 		// TODO(stevvooe): These error handling switches really need to be
 		// handled by an app global mapper.
+		if err == distribution.ErrUnsupported {
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeUnsupported)
+			return
+		}
 		switch err := err.(type) {
 		case distribution.ErrManifestVerification:
 			for _, verificationError := range err {
 				switch verificationError := verificationError.(type) {
-				case distribution.ErrUnknownLayer:
-					imh.Errors.Push(v2.ErrorCodeBlobUnknown, verificationError.FSLayer)
+				case distribution.ErrManifestBlobUnknown:
+					imh.Errors = append(imh.Errors, v2.ErrorCodeManifestBlobUnknown.WithDetail(verificationError.Digest))
+				case distribution.ErrManifestNameInvalid:
+					imh.Errors = append(imh.Errors, v2.ErrorCodeNameInvalid.WithDetail(err))
 				case distribution.ErrManifestUnverified:
-					imh.Errors.Push(v2.ErrorCodeManifestUnverified)
+					imh.Errors = append(imh.Errors, v2.ErrorCodeManifestUnverified)
 				default:
 					if verificationError == digest.ErrDigestInvalidFormat {
-						// TODO(stevvooe): We need to really need to move all
-						// errors to types. Its much more straightforward.
-						imh.Errors.Push(v2.ErrorCodeDigestInvalid)
+						imh.Errors = append(imh.Errors, v2.ErrorCodeDigestInvalid)
 					} else {
-						imh.Errors.PushErr(verificationError)
+						imh.Errors = append(imh.Errors, errcode.ErrorCodeUnknown, verificationError)
 					}
 				}
 			}
 		default:
-			imh.Errors.PushErr(err)
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeUnknown.WithDetail(err))
 		}
 
-		w.WriteHeader(http.StatusBadRequest)
 		return
+	}
+
+	// Tag this manifest
+	if imh.Tag != "" {
+		tags := imh.Repository.Tags(imh)
+		err = tags.Tag(imh, imh.Tag, desc)
+		if err != nil {
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeUnknown.WithDetail(err))
+			return
+		}
+
 	}
 
 	// Construct a canonical url for the uploaded manifest.
@@ -169,63 +288,51 @@ func (imh *imageManifestHandler) PutImageManifest(w http.ResponseWriter, r *http
 
 	w.Header().Set("Location", location)
 	w.Header().Set("Docker-Content-Digest", imh.Digest.String())
-	w.WriteHeader(http.StatusAccepted)
+	w.WriteHeader(http.StatusCreated)
 }
 
 // DeleteImageManifest removes the manifest with the given digest from the registry.
 func (imh *imageManifestHandler) DeleteImageManifest(w http.ResponseWriter, r *http.Request) {
 	ctxu.GetLogger(imh).Debug("DeleteImageManifest")
 
-	// Remove the link to the resources for this manifest to semantically satisfy manifest
-	// deletion (i.e. a subsequent request of this manifest will return non-existance).
-	manifests := imh.Repository.Manifests()
-	err := manifests.Delete(imh.Digest)
+	manifests, err := imh.Repository.Manifests(imh)
+	if err != nil {
+		imh.Errors = append(imh.Errors, err)
+		return
+	}
 
+	err = manifests.Delete(imh, imh.Digest)
 	if err != nil {
 		switch err {
 		case digest.ErrDigestUnsupported:
 		case digest.ErrDigestInvalidFormat:
-			imh.Errors.PushErr(err)
-			w.WriteHeader(http.StatusBadRequest)
+			imh.Errors = append(imh.Errors, v2.ErrorCodeDigestInvalid)
 			return
-		}
-
-		switch err.(type) {
-		case distribution.ErrUnknownManifestRevision:
-			imh.Errors.Push(v2.ErrorCodeManifestUnknown)
-			w.WriteHeader(http.StatusNotFound)
+		case distribution.ErrBlobUnknown:
+			imh.Errors = append(imh.Errors, v2.ErrorCodeManifestUnknown)
+			return
+		case distribution.ErrUnsupported:
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeUnsupported)
 			return
 		default:
-			imh.Errors.PushErr(err)
-			w.WriteHeader(http.StatusBadRequest)
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeUnknown)
+			return
+		}
+	}
+
+	tagService := imh.Repository.Tags(imh)
+	referencedTags, err := tagService.Lookup(imh, distribution.Descriptor{Digest: imh.Digest})
+	if err != nil {
+		imh.Errors = append(imh.Errors, err)
+		return
+	}
+
+	for _, tag := range referencedTags {
+		if err := tagService.Untag(imh, tag); err != nil {
+			imh.Errors = append(imh.Errors, err)
 			return
 		}
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-}
-
-// digestManifest takes a digest of the given manifest. This belongs somewhere
-// better but we'll wait for a refactoring cycle to find that real somewhere.
-func digestManifest(ctx context.Context, sm *manifest.SignedManifest) (digest.Digest, error) {
-	p, err := sm.Payload()
-	if err != nil {
-		if !strings.Contains(err.Error(), "missing signature key") {
-			ctxu.GetLogger(ctx).Errorf("error getting manifest payload: %v", err)
-			return "", err
-		}
-
-		// NOTE(stevvooe): There are no signatures but we still have a
-		// payload. The request will fail later but this is not the
-		// responsibility of this part of the code.
-		p = sm.Raw
-	}
-
-	dgst, err := digest.FromBytes(p)
-	if err != nil {
-		ctxu.GetLogger(ctx).Errorf("error digesting manifest: %v", err)
-		return "", err
-	}
-
-	return dgst, err
 }

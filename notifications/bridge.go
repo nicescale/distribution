@@ -4,11 +4,10 @@ import (
 	"net/http"
 	"time"
 
-	"code.google.com/p/go-uuid/uuid"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/context"
 	"github.com/docker/distribution/digest"
-	"github.com/docker/distribution/manifest"
+	"github.com/docker/distribution/uuid"
 )
 
 type bridge struct {
@@ -53,31 +52,40 @@ func NewRequestRecord(id string, r *http.Request) RequestRecord {
 	}
 }
 
-func (b *bridge) ManifestPushed(repo distribution.Repository, sm *manifest.SignedManifest) error {
+func (b *bridge) ManifestPushed(repo string, sm distribution.Manifest) error {
 	return b.createManifestEventAndWrite(EventActionPush, repo, sm)
 }
 
-func (b *bridge) ManifestPulled(repo distribution.Repository, sm *manifest.SignedManifest) error {
+func (b *bridge) ManifestPulled(repo string, sm distribution.Manifest) error {
 	return b.createManifestEventAndWrite(EventActionPull, repo, sm)
 }
 
-func (b *bridge) ManifestDeleted(repo distribution.Repository, sm *manifest.SignedManifest) error {
+func (b *bridge) ManifestDeleted(repo string, sm distribution.Manifest) error {
 	return b.createManifestEventAndWrite(EventActionDelete, repo, sm)
 }
 
-func (b *bridge) LayerPushed(repo distribution.Repository, layer distribution.Layer) error {
-	return b.createLayerEventAndWrite(EventActionPush, repo, layer)
+func (b *bridge) BlobPushed(repo string, desc distribution.Descriptor) error {
+	return b.createBlobEventAndWrite(EventActionPush, repo, desc)
 }
 
-func (b *bridge) LayerPulled(repo distribution.Repository, layer distribution.Layer) error {
-	return b.createLayerEventAndWrite(EventActionPull, repo, layer)
+func (b *bridge) BlobPulled(repo string, desc distribution.Descriptor) error {
+	return b.createBlobEventAndWrite(EventActionPull, repo, desc)
 }
 
-func (b *bridge) LayerDeleted(repo distribution.Repository, layer distribution.Layer) error {
-	return b.createLayerEventAndWrite(EventActionDelete, repo, layer)
+func (b *bridge) BlobMounted(repo string, desc distribution.Descriptor, fromRepo string) error {
+	event, err := b.createBlobEvent(EventActionMount, repo, desc)
+	if err != nil {
+		return err
+	}
+	event.Target.FromRepository = fromRepo
+	return b.sink.Write(*event)
 }
 
-func (b *bridge) createManifestEventAndWrite(action string, repo distribution.Repository, sm *manifest.SignedManifest) error {
+func (b *bridge) BlobDeleted(repo string, desc distribution.Descriptor) error {
+	return b.createBlobEventAndWrite(EventActionDelete, repo, desc)
+}
+
+func (b *bridge) createManifestEventAndWrite(action string, repo string, sm distribution.Manifest) error {
 	manifestEvent, err := b.createManifestEvent(action, repo, sm)
 	if err != nil {
 		return err
@@ -86,26 +94,21 @@ func (b *bridge) createManifestEventAndWrite(action string, repo distribution.Re
 	return b.sink.Write(*manifestEvent)
 }
 
-func (b *bridge) createManifestEvent(action string, repo distribution.Repository, sm *manifest.SignedManifest) (*Event, error) {
+func (b *bridge) createManifestEvent(action string, repo string, sm distribution.Manifest) (*Event, error) {
 	event := b.createEvent(action)
-	event.Target.MediaType = manifest.ManifestMediaType
-	event.Target.Repository = repo.Name()
+	event.Target.Repository = repo
 
-	p, err := sm.Payload()
+	mt, p, err := sm.Payload()
 	if err != nil {
 		return nil, err
 	}
 
+	event.Target.MediaType = mt
 	event.Target.Length = int64(len(p))
+	event.Target.Size = int64(len(p))
+	event.Target.Digest = digest.FromBytes(p)
 
-	event.Target.Digest, err = digest.FromBytes(p)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO(stevvooe): Currently, the is the "tag" url: once the digest url is
-	// implemented, this should be replaced.
-	event.Target.URL, err = b.ub.BuildManifestURL(sm.Name, sm.Tag)
+	event.Target.URL, err = b.ub.BuildManifestURL(repo, event.Target.Digest.String())
 	if err != nil {
 		return nil, err
 	}
@@ -113,8 +116,8 @@ func (b *bridge) createManifestEvent(action string, repo distribution.Repository
 	return event, nil
 }
 
-func (b *bridge) createLayerEventAndWrite(action string, repo distribution.Repository, layer distribution.Layer) error {
-	event, err := b.createLayerEvent(action, repo, layer)
+func (b *bridge) createBlobEventAndWrite(action string, repo string, desc distribution.Descriptor) error {
+	event, err := b.createBlobEvent(action, repo, desc)
 	if err != nil {
 		return err
 	}
@@ -122,18 +125,14 @@ func (b *bridge) createLayerEventAndWrite(action string, repo distribution.Repos
 	return b.sink.Write(*event)
 }
 
-func (b *bridge) createLayerEvent(action string, repo distribution.Repository, layer distribution.Layer) (*Event, error) {
+func (b *bridge) createBlobEvent(action string, repo string, desc distribution.Descriptor) (*Event, error) {
 	event := b.createEvent(action)
-	event.Target.MediaType = layerMediaType
-	event.Target.Repository = repo.Name()
-
-	event.Target.Length = layer.Length()
-
-	dgst := layer.Digest()
-	event.Target.Digest = dgst
+	event.Target.Descriptor = desc
+	event.Target.Length = desc.Size
+	event.Target.Repository = repo
 
 	var err error
-	event.Target.URL, err = b.ub.BuildBlobURL(repo.Name(), dgst)
+	event.Target.URL, err = b.ub.BuildBlobURL(repo, desc.Digest)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +153,7 @@ func (b *bridge) createEvent(action string) *Event {
 // createEvent returns a new event, timestamped, with the specified action.
 func createEvent(action string) *Event {
 	return &Event{
-		ID:        uuid.New(),
+		ID:        uuid.Generate().String(),
 		Timestamp: time.Now(),
 		Action:    action,
 	}

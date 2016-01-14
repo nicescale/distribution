@@ -10,7 +10,8 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/configuration"
-	"github.com/docker/distribution/manifest"
+	"github.com/docker/distribution/manifest/schema1"
+	"github.com/docker/distribution/manifest/schema2"
 	"github.com/docker/distribution/notifications"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -98,7 +99,7 @@ func New(configuration *configuration.Configuration) (*IndexService, error) {
 
 func (self *IndexService) Write(events ...notifications.Event) error {
 	for _, event := range events {
-		if event.Target.MediaType == manifest.ManifestMediaType {
+		if event.Target.MediaType == schema2.MediaTypeManifest || event.Target.MediaType == schema1.MediaTypeManifest {
 			if event.Action == notifications.EventActionDelete {
 				if err := self.delete(event); err != nil {
 					return err

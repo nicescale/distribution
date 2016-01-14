@@ -11,6 +11,7 @@ import (
 const (
 	EventActionPull   = "pull"
 	EventActionPush   = "push"
+	EventActionMount  = "mount"
 	EventActionDelete = "delete"
 )
 
@@ -54,8 +55,16 @@ type Event struct {
 
 		distribution.Descriptor
 
+		// Length in bytes of content. Same as Size field in Descriptor.
+		// Provided for backwards compatibility.
+		Length int64 `json:"length,omitempty"`
+
 		// Repository identifies the named repository.
 		Repository string `json:"repository,omitempty"`
+
+		// FromRepository identifies the named repository which a blob was mounted
+		// from if appropriate.
+		FromRepository string `json:"fromRepository,omitempty"`
 
 		// URL provides a direct link to the content.
 		URL string `json:"url,omitempty"`
